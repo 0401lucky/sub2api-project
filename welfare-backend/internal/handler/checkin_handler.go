@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -57,7 +58,8 @@ func (h *CheckinHandler) Daily(c *gin.Context) {
 		case errors.Is(err, service.ErrCheckinBusy):
 			Error(c, http.StatusConflict, "签到处理中，请稍后重试")
 		default:
-			Error(c, http.StatusBadGateway, "发放额度失败，请稍后重试")
+			log.Printf("checkin add balance failed: user_id=%d subject=%s err=%v", claims.Sub2APIUserID, claims.LinuxDOSubject, err)
+			Error(c, http.StatusBadGateway, "发放额度失败: "+err.Error())
 		}
 		return
 	}
