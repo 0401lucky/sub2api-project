@@ -130,6 +130,19 @@ func (s *CheckinService) GetStatus(ctx context.Context, actor CheckinActor, ip s
 		}
 		return nil, err
 	}
+	if grant.Status != model.GrantStatusSuccess {
+		reconciled, err := s.reconcileGrantFromSub2API(ctx, &grant)
+		if err != nil {
+			return nil, err
+		}
+		if reconciled {
+			out.GrantStatus = model.GrantStatusSuccess
+			out.Amount = grant.Amount
+			out.CheckedIn = true
+			out.CanCheckin = false
+			return out, nil
+		}
+	}
 	out.GrantStatus = grant.Status
 	out.Amount = grant.Amount
 	out.CheckedIn = grant.Status == model.GrantStatusSuccess
@@ -156,6 +169,34 @@ func (s *CheckinService) Checkin(ctx context.Context, actor CheckinActor, ip, us
 	if err != nil {
 		return nil, err
 	}
+	var preGrant model.CheckinGrant
+	preErr := s.db.WithContext(ctx).
+		Where("campaign_id = ? AND sub2_api_user_id = ? AND checkin_date = ?", campaign.ID, actor.Sub2APIUserID, date).
+		First(&preGrant).Error
+	if preErr == nil {
+		if preGrant.Status == model.GrantStatusSuccess {
+			return &CheckinResult{
+				Date:    date,
+				Amount:  preGrant.Amount,
+				Status:  model.GrantStatusSuccess,
+				GrantID: preGrant.ID,
+				Message: "今日已签到",
+			}, ErrAlreadyChecked
+		}
+		reconciled, err := s.reconcileGrantFromSub2API(ctx, &preGrant)
+		if err != nil {
+			return nil, err
+		}
+		if reconciled {
+			return &CheckinResult{
+				Date:    date,
+				Amount:  preGrant.Amount,
+				Status:  model.GrantStatusSuccess,
+				GrantID: preGrant.ID,
+				Message: "今日已签到",
+			}, ErrAlreadyChecked
+		}
+	}
 
 	var reserved model.CheckinGrant
 	reserveErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -175,10 +216,7 @@ func (s *CheckinService) Checkin(ctx context.Context, actor CheckinActor, ip, us
 		if err != nil {
 			return err
 		}
-		noteToken, err := util.RandomToken(12)
-		if err != nil {
-			return err
-		}
+		noteToken := buildDailyNoteToken(campaign.Code, actor.Sub2APIUserID, date)
 		hash := util.SHA256String(userAgent)
 		if len(hash) > 64 {
 			hash = hash[:64]
@@ -217,7 +255,9 @@ func (s *CheckinService) Checkin(ctx context.Context, actor CheckinActor, ip, us
 		existing.Amount = amount
 		existing.Status = model.GrantStatusProcessing
 		existing.IdempotencyKey = idempotencyKey
-		existing.NoteToken = noteToken
+		if strings.TrimSpace(existing.NoteToken) == "" {
+			existing.NoteToken = noteToken
+		}
 		existing.AttemptCount = existing.AttemptCount + 1
 		existing.RequestIP = ip
 		existing.UserAgentHash = hash
@@ -247,14 +287,22 @@ func (s *CheckinService) Checkin(ctx context.Context, actor CheckinActor, ip, us
 	}
 
 	noteText := fmt.Sprintf("welfare_checkin:%s", reserved.NoteToken)
+	found, err := s.sub2api.HasBalanceRecordByNoteToken(ctx, actor.Sub2APIUserID, reserved.NoteToken)
+	if err == nil && found {
+		appliedAt := time.Now()
+		if err := s.db.WithContext(ctx).Model(&model.CheckinGrant{}).
+			Where("id = ?", reserved.ID).
+			Updates(map[string]interface{}{"status": model.GrantStatusSuccess, "applied_at": &appliedAt, "last_error": "", "updated_at": time.Now()}).Error; err != nil {
+			return nil, err
+		}
+		return &CheckinResult{Date: date, Amount: reserved.Amount, Status: model.GrantStatusSuccess, GrantID: reserved.ID, Message: "今日已签到"}, ErrAlreadyChecked
+	}
 	addErr := s.sub2api.AddBalance(ctx, actor.Sub2APIUserID, reserved.Amount, noteText)
 	if addErr != nil {
 		reconciled := false
-		if isTimeoutLike(addErr) {
-			found, err := s.sub2api.HasBalanceRecordByNoteToken(ctx, actor.Sub2APIUserID, reserved.NoteToken)
-			if err == nil && found {
-				reconciled = true
-			}
+		found, err := s.sub2api.HasBalanceRecordByNoteToken(ctx, actor.Sub2APIUserID, reserved.NoteToken)
+		if err == nil && found {
+			reconciled = true
 		}
 		if reconciled {
 			appliedAt := time.Now()
@@ -513,4 +561,28 @@ func isTimeoutLike(err error) bool {
 	}
 	var nerr net.Error
 	return errors.As(err, &nerr) && nerr.Timeout()
+}
+
+func buildDailyNoteToken(campaignCode string, userID int64, date string) string {
+	return fmt.Sprintf("wfck:%s:%d:%s", strings.TrimSpace(campaignCode), userID, strings.TrimSpace(date))
+}
+
+func (s *CheckinService) reconcileGrantFromSub2API(ctx context.Context, grant *model.CheckinGrant) (bool, error) {
+	if grant == nil || strings.TrimSpace(grant.NoteToken) == "" || grant.Status == model.GrantStatusSuccess {
+		return false, nil
+	}
+	found, err := s.sub2api.HasBalanceRecordByNoteToken(ctx, grant.Sub2APIUserID, grant.NoteToken)
+	if err != nil || !found {
+		return false, nil
+	}
+	appliedAt := time.Now()
+	if err := s.db.WithContext(ctx).Model(&model.CheckinGrant{}).
+		Where("id = ?", grant.ID).
+		Updates(map[string]interface{}{"status": model.GrantStatusSuccess, "applied_at": &appliedAt, "last_error": "", "updated_at": time.Now()}).Error; err != nil {
+		return false, err
+	}
+	grant.Status = model.GrantStatusSuccess
+	grant.AppliedAt = &appliedAt
+	grant.LastError = ""
+	return true, nil
 }
