@@ -35,3 +35,6 @@ go run ./cmd/server
 - `WELFARE_CORS_ALLOWED_ORIGINS` 必填，按前端域名精确配置
 - `WELFARE_TRUSTED_PROXIES` 只填网关/反代地址，禁止信任公网来源
 - 生产环境请开启 `WELFARE_COOKIE_SECURE=true`
+- 若前后端不在同一站点（不同主域名），请设置 `WELFARE_COOKIE_SAMESITE=none`，并确保 `WELFARE_COOKIE_SECURE=true`
+- `LINUXDO_REDIRECT_URL` 必须配置为后端回调地址：`https://<后端域名>/api/v1/auth/linuxdo/callback`
+- `WELFARE_FRONTEND_CALLBACK_URL` 必须配置为前端回调页面：`https://<前端域名>/auth/callback`

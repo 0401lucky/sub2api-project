@@ -47,6 +47,7 @@ func Build() (*gin.Engine, *config.Config, error) {
 		revocationService,
 		cfg.FrontendCallbackURL,
 		cfg.CookieSecure,
+		cfg.CookieSameSite,
 		cfg.JWTExpire,
 	)
 	checkinHandler := handler.NewCheckinHandler(checkinService)

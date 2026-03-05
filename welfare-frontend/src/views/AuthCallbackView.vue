@@ -43,11 +43,18 @@ onMounted(async () => {
   const hash = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : window.location.hash
   const params = new URLSearchParams(hash)
   const errCode = params.get('error') || ''
+  const oauthCode = typeof route.query.code === 'string' ? route.query.code.trim() : ''
+  const oauthState = typeof route.query.state === 'string' ? route.query.state.trim() : ''
   const rawRedirect = params.get('redirect') || (typeof route.query.redirect === 'string' ? route.query.redirect : '/')
   const redirect = sanitizeAuthRedirect(rawRedirect)
 
   if (errCode) {
     error.value = resolveOAuthErrorMessage(errCode)
+    return
+  }
+
+  if (oauthCode || oauthState) {
+    error.value = '登录回调配置错误：请将 LinuxDo 回调地址配置为后端 /api/v1/auth/linuxdo/callback'
     return
   }
 

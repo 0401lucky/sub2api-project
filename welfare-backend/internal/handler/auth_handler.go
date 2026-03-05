@@ -30,6 +30,7 @@ type AuthHandler struct {
 	revocationService   *service.TokenRevocationService
 	frontendCallbackURL string
 	cookieSecure        bool
+	cookieSameSite      http.SameSite
 	jwtExpire           time.Duration
 }
 
@@ -40,6 +41,7 @@ func NewAuthHandler(
 	revocationService *service.TokenRevocationService,
 	frontendCallbackURL string,
 	cookieSecure bool,
+	cookieSameSite string,
 	jwtExpire time.Duration,
 ) *AuthHandler {
 	return &AuthHandler{
@@ -49,6 +51,7 @@ func NewAuthHandler(
 		revocationService:   revocationService,
 		frontendCallbackURL: frontendCallbackURL,
 		cookieSecure:        cookieSecure,
+		cookieSameSite:      parseSameSite(cookieSameSite),
 		jwtExpire:           jwtExpire,
 	}
 }
@@ -67,9 +70,9 @@ func (h *AuthHandler) StartLinuxDoOAuth(c *gin.Context) {
 	challenge := sha256Base64URL(verifier)
 	redirectTo := sanitizeRedirect(c.Query("redirect"))
 
-	setCookie(c, oauthStateCookie, state, 600, h.cookieSecure)
-	setCookie(c, oauthVerifierCookie, verifier, 600, h.cookieSecure)
-	setCookie(c, oauthRedirectCookie, redirectTo, 600, h.cookieSecure)
+	setCookie(c, oauthStateCookie, state, 600, h.cookieSecure, h.cookieSameSite)
+	setCookie(c, oauthVerifierCookie, verifier, 600, h.cookieSecure, h.cookieSameSite)
+	setCookie(c, oauthRedirectCookie, redirectTo, 600, h.cookieSecure, h.cookieSameSite)
 
 	authURL, err := h.linuxdo.BuildAuthorizeURL(state, challenge)
 	if err != nil {
@@ -132,10 +135,10 @@ func (h *AuthHandler) LinuxDoCallback(c *gin.Context) {
 		return
 	}
 
-	clearCookie(c, oauthStateCookie, h.cookieSecure)
-	clearCookie(c, oauthVerifierCookie, h.cookieSecure)
-	clearCookie(c, oauthRedirectCookie, h.cookieSecure)
-	setCookie(c, accessTokenCookie, token, int(h.jwtExpire.Seconds()), h.cookieSecure)
+	clearCookie(c, oauthStateCookie, h.cookieSecure, h.cookieSameSite)
+	clearCookie(c, oauthVerifierCookie, h.cookieSecure, h.cookieSameSite)
+	clearCookie(c, oauthRedirectCookie, h.cookieSecure, h.cookieSameSite)
+	setCookie(c, accessTokenCookie, token, int(h.jwtExpire.Seconds()), h.cookieSecure, h.cookieSameSite)
 
 	fragment := url.Values{}
 	fragment.Set("expires_at", expiresAt.Format(time.RFC3339))
@@ -163,7 +166,7 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	if claims, ok := middleware.GetClaims(c); ok && h.revocationService != nil && claims.ExpiresAt != nil {
 		h.revocationService.Revoke(claims.ID, claims.ExpiresAt.Time)
 	}
-	clearCookie(c, accessTokenCookie, h.cookieSecure)
+	clearCookie(c, accessTokenCookie, h.cookieSecure, h.cookieSameSite)
 	Success(c, gin.H{"ok": true})
 }
 
@@ -206,7 +209,7 @@ func isSafeRedirectPath(path string) bool {
 	}
 }
 
-func setCookie(c *gin.Context, name, value string, maxAge int, secure bool) {
+func setCookie(c *gin.Context, name, value string, maxAge int, secure bool, sameSite http.SameSite) {
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     name,
 		Value:    value,
@@ -214,11 +217,11 @@ func setCookie(c *gin.Context, name, value string, maxAge int, secure bool) {
 		MaxAge:   maxAge,
 		HttpOnly: true,
 		Secure:   secure,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: sameSite,
 	})
 }
 
-func clearCookie(c *gin.Context, name string, secure bool) {
+func clearCookie(c *gin.Context, name string, secure bool, sameSite http.SameSite) {
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     name,
 		Value:    "",
@@ -226,6 +229,17 @@ func clearCookie(c *gin.Context, name string, secure bool) {
 		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   secure,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: sameSite,
 	})
+}
+
+func parseSameSite(raw string) http.SameSite {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "strict":
+		return http.SameSiteStrictMode
+	case "none":
+		return http.SameSiteNoneMode
+	default:
+		return http.SameSiteLaxMode
+	}
 }

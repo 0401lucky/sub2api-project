@@ -15,6 +15,7 @@ type Config struct {
 	ServerAddr          string
 	FrontendCallbackURL string
 	CookieSecure        bool
+	CookieSameSite      string
 	CORSAllowedOrigins  []string
 	TrustedProxies      []string
 
@@ -62,6 +63,7 @@ func Load() (*Config, error) {
 		ServerAddr:             getenv("WELFARE_SERVER_ADDR", ":8080"),
 		FrontendCallbackURL:    getenv("WELFARE_FRONTEND_CALLBACK_URL", "http://localhost:5173/auth/callback"),
 		CookieSecure:           cookieSecure,
+		CookieSameSite:         strings.ToLower(strings.TrimSpace(getenv("WELFARE_COOKIE_SAMESITE", "lax"))),
 		CORSAllowedOrigins:     parseList(getenv("WELFARE_CORS_ALLOWED_ORIGINS", "")),
 		TrustedProxies:         parseList(getenv("WELFARE_TRUSTED_PROXIES", "")),
 		JWTSecret:              strings.TrimSpace(getenv("WELFARE_JWT_SECRET", "")),
@@ -98,6 +100,14 @@ func Load() (*Config, error) {
 	}
 	if len(cfg.CORSAllowedOrigins) == 0 {
 		return nil, errors.New("WELFARE_CORS_ALLOWED_ORIGINS is required")
+	}
+	switch cfg.CookieSameSite {
+	case "lax", "strict", "none":
+	default:
+		return nil, errors.New("WELFARE_COOKIE_SAMESITE must be one of: lax, strict, none")
+	}
+	if cfg.CookieSameSite == "none" && !cfg.CookieSecure {
+		return nil, errors.New("WELFARE_COOKIE_SECURE must be true when WELFARE_COOKIE_SAMESITE=none")
 	}
 	if cfg.JWTExpire <= 0 {
 		return nil, errors.New("WELFARE_JWT_EXPIRE must be greater than 0")
