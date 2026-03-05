@@ -202,11 +202,12 @@ func (s *CheckinService) Checkin(ctx context.Context, actor CheckinActor, ip, us
 	var reserved model.CheckinGrant
 	reserveErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var existing model.CheckinGrant
-		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		lookupErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("campaign_id = ? AND sub2_api_user_id = ? AND checkin_date = ?", campaign.ID, actor.Sub2APIUserID, date).
 			First(&existing).Error
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
+		notFound := errors.Is(lookupErr, gorm.ErrRecordNotFound)
+		if lookupErr != nil && !notFound {
+			return lookupErr
 		}
 
 		amount, err := util.RandomDecimalInRange(campaign.RewardMin, campaign.RewardMax, campaign.RewardScale)
@@ -223,7 +224,7 @@ func (s *CheckinService) Checkin(ctx context.Context, actor CheckinActor, ip, us
 			hash = hash[:64]
 		}
 
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		if notFound {
 			reserved = model.CheckinGrant{
 				CampaignID:     campaign.ID,
 				Sub2APIUserID:  actor.Sub2APIUserID,
