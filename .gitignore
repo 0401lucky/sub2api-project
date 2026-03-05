@@ -1,0 +1,9 @@
+# backend
+welfare-backend/.env
+welfare-backend/welfare.db
+welfare-backend/*.db
+
+# frontend
+welfare-frontend/node_modules
+welfare-frontend/dist
+welfare-frontend/.env
