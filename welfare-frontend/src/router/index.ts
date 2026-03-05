@@ -11,7 +11,7 @@ const router = createRouter({
     { path: '/login', component: LoginView },
     { path: '/auth/callback', component: AuthCallbackView },
     { path: '/', component: HomeView, meta: { requireAuth: true } },
-    { path: '/admin', component: AdminView, meta: { requireAuth: true } }
+    { path: '/admin', component: AdminView, meta: { requireAuth: true, requireAdmin: true } }
   ]
 })
 
@@ -22,6 +22,9 @@ router.beforeEach(async (to) => {
   }
   if (to.meta.requireAuth && !auth.state.token) {
     return '/login'
+  }
+  if (to.meta.requireAdmin && !auth.state.profile?.is_admin) {
+    return '/'
   }
   return true
 })

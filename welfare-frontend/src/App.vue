@@ -4,7 +4,7 @@
       <h1>签到福利站</h1>
       <nav>
         <RouterLink to="/">首页</RouterLink>
-        <RouterLink to="/admin">管理后台</RouterLink>
+        <RouterLink v-if="isAdmin" to="/admin">管理后台</RouterLink>
         <RouterLink to="/login">登录</RouterLink>
       </nav>
     </header>
@@ -15,7 +15,12 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
+import { useAuthStore } from './store/auth'
+
+const auth = useAuthStore()
+const isAdmin = computed(() => Boolean(auth.state.profile?.is_admin))
 </script>
 
 <style>
