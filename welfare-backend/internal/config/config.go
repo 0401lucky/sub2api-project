@@ -57,7 +57,7 @@ func Load() (*Config, error) {
 		LinuxDoAuthorizeURL:    strings.TrimSpace(getenv("LINUXDO_AUTHORIZE_URL", "https://connect.linux.do/oauth2/authorize")),
 		LinuxDoTokenURL:        strings.TrimSpace(getenv("LINUXDO_TOKEN_URL", "https://connect.linux.do/oauth2/token")),
 		LinuxDoUserInfoURL:     strings.TrimSpace(getenv("LINUXDO_USERINFO_URL", "https://connect.linux.do/api/user")),
-		LinuxDoScopes:          strings.TrimSpace(getenv("LINUXDO_SCOPES", "user")),
+		LinuxDoScopes:          strings.TrimSpace(getenv("LINUXDO_SCOPES", "openid profile email")),
 		LinuxDoRedirectURL:     strings.TrimSpace(getenv("LINUXDO_REDIRECT_URL", "")),
 		LinuxDoUserIDField:     strings.TrimSpace(getenv("LINUXDO_USERINFO_ID_FIELD", "id")),
 		LinuxDoUserNameField:   strings.TrimSpace(getenv("LINUXDO_USERINFO_USERNAME_FIELD", "username")),
