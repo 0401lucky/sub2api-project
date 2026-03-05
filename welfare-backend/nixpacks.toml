@@ -1,0 +1,15 @@
+[variables]
+GOTOOLCHAIN = "auto"
+
+[phases.setup]
+nixPkgs = ["go_1_25", "gcc", "pkg-config"]
+
+[phases.build]
+cmds = [
+  "go mod download",
+  "CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -a -installsuffix cgo -o welfare-backend ./cmd/server/main.go"
+]
+
+[start]
+cmd = "./welfare-backend"
+
