@@ -11,6 +11,7 @@ import (
 	"welfare-backend/internal/model"
 	"welfare-backend/internal/util"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -236,6 +237,19 @@ func (s *CheckinService) Checkin(ctx context.Context, actor CheckinActor, ip, us
 				UserAgentHash:  hash,
 			}
 			if err := tx.Create(&reserved).Error; err != nil {
+				if isDuplicateConstraintError(err) {
+					var conflicted model.CheckinGrant
+					qerr := tx.
+						Where("campaign_id = ? AND sub2_api_user_id = ? AND checkin_date = ?", campaign.ID, actor.Sub2APIUserID, date).
+						First(&conflicted).Error
+					if qerr == nil {
+						reserved = conflicted
+						if conflicted.Status == model.GrantStatusSuccess {
+							return ErrAlreadyChecked
+						}
+						return ErrCheckinBusy
+					}
+				}
 				return err
 			}
 			return nil
@@ -561,6 +575,22 @@ func isTimeoutLike(err error) bool {
 	}
 	var nerr net.Error
 	return errors.As(err, &nerr) && nerr.Timeout()
+}
+
+func isDuplicateConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, gorm.ErrDuplicatedKey) {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate key value violates unique constraint") ||
+		strings.Contains(msg, "unique constraint failed")
 }
 
 func buildDailyNoteToken(campaignCode string, userID int64, date string) string {
