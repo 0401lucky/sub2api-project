@@ -31,7 +31,8 @@ func (h *CheckinHandler) Status(c *gin.Context) {
 		LinuxDOSubject: claims.LinuxDOSubject,
 	}, c.ClientIP())
 	if err != nil {
-		Error(c, http.StatusInternalServerError, err.Error())
+		log.Printf("checkin status failed: user_id=%d subject=%s err=%v", claims.Sub2APIUserID, claims.LinuxDOSubject, err)
+		Error(c, http.StatusInternalServerError, "获取签到状态失败，请稍后重试")
 		return
 	}
 	Success(c, status)
@@ -56,10 +57,14 @@ func (h *CheckinHandler) Daily(c *gin.Context) {
 		case errors.Is(err, service.ErrAlreadyChecked):
 			Success(c, result)
 		case errors.Is(err, service.ErrCheckinBusy):
+			if result != nil {
+				Success(c, result)
+				return
+			}
 			Error(c, http.StatusConflict, "签到处理中，请稍后重试")
 		default:
 			log.Printf("checkin add balance failed: user_id=%d subject=%s err=%v", claims.Sub2APIUserID, claims.LinuxDOSubject, err)
-			Error(c, http.StatusBadGateway, "发放额度失败: "+err.Error())
+			Error(c, http.StatusBadGateway, "发放额度失败，请稍后重试")
 		}
 		return
 	}
@@ -76,7 +81,8 @@ func (h *CheckinHandler) History(c *gin.Context) {
 	pageSize := parseInt(c.DefaultQuery("page_size", "20"), 20)
 	items, total, err := h.checkin.ListUserHistory(c.Request.Context(), claims.Sub2APIUserID, page, pageSize)
 	if err != nil {
-		Error(c, http.StatusInternalServerError, err.Error())
+		log.Printf("checkin history failed: user_id=%d subject=%s err=%v", claims.Sub2APIUserID, claims.LinuxDOSubject, err)
+		Error(c, http.StatusInternalServerError, "获取签到记录失败，请稍后重试")
 		return
 	}
 	Success(c, gin.H{

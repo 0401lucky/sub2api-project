@@ -33,6 +33,9 @@ func NewLinuxDoService(
 	clientID, clientSecret, authorizeURL, tokenURL, userinfoURL, scopes, redirectURL, userIDField, userNameField string,
 	httpClient *http.Client,
 ) *LinuxDoService {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
 	return &LinuxDoService{
 		clientID:      clientID,
 		clientSecret:  clientSecret,

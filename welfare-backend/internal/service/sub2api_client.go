@@ -33,7 +33,10 @@ type sub2apiEnvelope struct {
 }
 
 type sub2apiListData[T any] struct {
-	Items []T `json:"items"`
+	Items    []T `json:"items"`
+	Page     int `json:"page"`
+	PageSize int `json:"page_size"`
+	Total    int `json:"total"`
 }
 
 type sub2apiBalanceHistoryItem struct {
@@ -49,26 +52,33 @@ func NewSub2APIClient(baseURL, apiKey string, timeout time.Duration) *Sub2APICli
 }
 
 func (c *Sub2APIClient) FindUserBySyntheticEmail(ctx context.Context, email string) (*Sub2APIUser, error) {
-	q := url.Values{}
-	q.Set("search", email)
-	q.Set("page", "1")
-	q.Set("page_size", "20")
-	endpoint := c.baseURL + "/api/v1/admin/users?" + q.Encode()
+	targetEmail := strings.TrimSpace(email)
+	const pageSize = 100
+	for page := 1; page <= 50; page++ {
+		q := url.Values{}
+		q.Set("search", targetEmail)
+		q.Set("page", strconv.Itoa(page))
+		q.Set("page_size", strconv.Itoa(pageSize))
+		endpoint := c.baseURL + "/api/v1/admin/users?" + q.Encode()
 
-	var env sub2apiEnvelope
-	if err := c.do(ctx, http.MethodGet, endpoint, nil, &env); err != nil {
-		return nil, err
-	}
-	if env.Code != 0 {
-		return nil, fmt.Errorf("sub2api error: %s", env.Message)
-	}
-	var data sub2apiListData[Sub2APIUser]
-	if err := json.Unmarshal(env.Data, &data); err != nil {
-		return nil, fmt.Errorf("parse sub2api users: %w", err)
-	}
-	for i := range data.Items {
-		if strings.EqualFold(strings.TrimSpace(data.Items[i].Email), strings.TrimSpace(email)) {
-			return &data.Items[i], nil
+		var env sub2apiEnvelope
+		if err := c.do(ctx, http.MethodGet, endpoint, nil, &env); err != nil {
+			return nil, err
+		}
+		if env.Code != 0 {
+			return nil, fmt.Errorf("sub2api error: %s", env.Message)
+		}
+		var data sub2apiListData[Sub2APIUser]
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			return nil, fmt.Errorf("parse sub2api users: %w", err)
+		}
+		for i := range data.Items {
+			if strings.EqualFold(strings.TrimSpace(data.Items[i].Email), targetEmail) {
+				return &data.Items[i], nil
+			}
+		}
+		if len(data.Items) < pageSize {
+			break
 		}
 	}
 	return nil, nil
@@ -92,26 +102,33 @@ func (c *Sub2APIClient) AddBalance(ctx context.Context, userID int64, amount flo
 }
 
 func (c *Sub2APIClient) HasBalanceRecordByNoteToken(ctx context.Context, userID int64, noteToken string) (bool, error) {
-	q := url.Values{}
-	q.Set("type", "admin_balance")
-	q.Set("page", "1")
-	q.Set("page_size", "100")
-	endpoint := c.baseURL + "/api/v1/admin/users/" + strconv.FormatInt(userID, 10) + "/balance-history?" + q.Encode()
+	token := strings.TrimSpace(noteToken)
+	const pageSize = 100
+	for page := 1; page <= 50; page++ {
+		q := url.Values{}
+		q.Set("type", "admin_balance")
+		q.Set("page", strconv.Itoa(page))
+		q.Set("page_size", strconv.Itoa(pageSize))
+		endpoint := c.baseURL + "/api/v1/admin/users/" + strconv.FormatInt(userID, 10) + "/balance-history?" + q.Encode()
 
-	var env sub2apiEnvelope
-	if err := c.do(ctx, http.MethodGet, endpoint, nil, &env); err != nil {
-		return false, err
-	}
-	if env.Code != 0 {
-		return false, fmt.Errorf("sub2api list balance history failed: %s", env.Message)
-	}
-	var data sub2apiListData[sub2apiBalanceHistoryItem]
-	if err := json.Unmarshal(env.Data, &data); err != nil {
-		return false, fmt.Errorf("parse sub2api balance history: %w", err)
-	}
-	for _, item := range data.Items {
-		if strings.Contains(item.Notes, noteToken) {
-			return true, nil
+		var env sub2apiEnvelope
+		if err := c.do(ctx, http.MethodGet, endpoint, nil, &env); err != nil {
+			return false, err
+		}
+		if env.Code != 0 {
+			return false, fmt.Errorf("sub2api list balance history failed: %s", env.Message)
+		}
+		var data sub2apiListData[sub2apiBalanceHistoryItem]
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			return false, fmt.Errorf("parse sub2api balance history: %w", err)
+		}
+		for _, item := range data.Items {
+			if strings.Contains(item.Notes, token) {
+				return true, nil
+			}
+		}
+		if len(data.Items) < pageSize {
+			break
 		}
 	}
 	return false, nil

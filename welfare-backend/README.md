@@ -8,6 +8,7 @@
 - 每日签到随机发放额度
 - 调用 sub2api 管理接口加余额（不改 sub2api 源码）
 - 管理后台：签到配置、签到记录、风控封禁
+- JWT 使用 HttpOnly Cookie 会话（前端不落地 token）
 
 ## 启动
 ```bash
@@ -29,3 +30,8 @@ go run ./cmd/server
 - `GET /api/v1/admin/risk/blocks`
 - `POST /api/v1/admin/risk/blocks`
 - `DELETE /api/v1/admin/risk/blocks/:id`
+
+## 安全配置建议
+- `WELFARE_CORS_ALLOWED_ORIGINS` 必填，按前端域名精确配置
+- `WELFARE_TRUSTED_PROXIES` 只填网关/反代地址，禁止信任公网来源
+- 生产环境请开启 `WELFARE_COOKIE_SECURE=true`

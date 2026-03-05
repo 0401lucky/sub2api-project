@@ -16,9 +16,12 @@ type Config struct {
 	FrontendCallbackURL string
 	CookieSecure        bool
 	CORSAllowedOrigins  []string
+	TrustedProxies      []string
 
-	JWTSecret string
-	JWTExpire time.Duration
+	JWTSecret   string
+	JWTExpire   time.Duration
+	JWTIssuer   string
+	JWTAudience string
 
 	DatabaseDriver string
 	DatabaseDSN    string
@@ -43,13 +46,28 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
+	cookieSecure, err := getenvBool("WELFARE_COOKIE_SECURE", false)
+	if err != nil {
+		return nil, err
+	}
+	jwtExpire, err := getenvDuration("WELFARE_JWT_EXPIRE", 24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	sub2apiTimeout, err := getenvDuration("SUB2API_TIMEOUT", 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
 	cfg := &Config{
 		ServerAddr:             getenv("WELFARE_SERVER_ADDR", ":8080"),
 		FrontendCallbackURL:    getenv("WELFARE_FRONTEND_CALLBACK_URL", "http://localhost:5173/auth/callback"),
-		CookieSecure:           getenvBool("WELFARE_COOKIE_SECURE", false),
+		CookieSecure:           cookieSecure,
 		CORSAllowedOrigins:     parseList(getenv("WELFARE_CORS_ALLOWED_ORIGINS", "")),
+		TrustedProxies:         parseList(getenv("WELFARE_TRUSTED_PROXIES", "")),
 		JWTSecret:              strings.TrimSpace(getenv("WELFARE_JWT_SECRET", "")),
-		JWTExpire:              getenvDuration("WELFARE_JWT_EXPIRE", 24*time.Hour),
+		JWTExpire:              jwtExpire,
+		JWTIssuer:              strings.TrimSpace(getenv("WELFARE_JWT_ISSUER", "welfare-backend")),
+		JWTAudience:            strings.TrimSpace(getenv("WELFARE_JWT_AUDIENCE", "welfare-frontend")),
 		DatabaseDriver:         strings.ToLower(strings.TrimSpace(getenv("WELFARE_DATABASE_DRIVER", "sqlite"))),
 		DatabaseDSN:            strings.TrimSpace(getenv("WELFARE_DATABASE_DSN", "welfare.db")),
 		LinuxDoClientID:        strings.TrimSpace(getenv("LINUXDO_CLIENT_ID", "")),
@@ -63,7 +81,7 @@ func Load() (*Config, error) {
 		LinuxDoUserNameField:   strings.TrimSpace(getenv("LINUXDO_USERINFO_USERNAME_FIELD", "username")),
 		Sub2APIBaseURL:         strings.TrimRight(strings.TrimSpace(getenv("SUB2API_BASE_URL", "")), "/"),
 		Sub2APIAdminAPIKey:     strings.TrimSpace(getenv("SUB2API_ADMIN_API_KEY", "")),
-		Sub2APITimeout:         getenvDuration("SUB2API_TIMEOUT", 10*time.Second),
+		Sub2APITimeout:         sub2apiTimeout,
 		Sub2APISyntheticDomain: strings.TrimSpace(getenv("SUB2API_SYNTHETIC_DOMAIN", defaultLinuxDoDomain)),
 		AdminSubjects:          parseSet(getenv("WELFARE_ADMIN_SUBJECTS", "")),
 		CheckinTimezone:        strings.TrimSpace(getenv("WELFARE_CHECKIN_TIMEZONE", "Asia/Shanghai")),
@@ -77,6 +95,21 @@ func Load() (*Config, error) {
 	}
 	if cfg.Sub2APIBaseURL == "" || cfg.Sub2APIAdminAPIKey == "" {
 		return nil, errors.New("SUB2API_BASE_URL and SUB2API_ADMIN_API_KEY are required")
+	}
+	if len(cfg.CORSAllowedOrigins) == 0 {
+		return nil, errors.New("WELFARE_CORS_ALLOWED_ORIGINS is required")
+	}
+	if cfg.JWTExpire <= 0 {
+		return nil, errors.New("WELFARE_JWT_EXPIRE must be greater than 0")
+	}
+	if cfg.Sub2APITimeout <= 0 {
+		return nil, errors.New("SUB2API_TIMEOUT must be greater than 0")
+	}
+	if cfg.JWTIssuer == "" {
+		return nil, errors.New("WELFARE_JWT_ISSUER is required")
+	}
+	if cfg.JWTAudience == "" {
+		return nil, errors.New("WELFARE_JWT_AUDIENCE is required")
 	}
 	if _, err := time.LoadLocation(cfg.CheckinTimezone); err != nil {
 		return nil, fmt.Errorf("invalid WELFARE_CHECKIN_TIMEZONE: %w", err)
@@ -95,28 +128,28 @@ func getenv(key, fallback string) string {
 	return v
 }
 
-func getenvBool(key string, fallback bool) bool {
+func getenvBool(key string, fallback bool) (bool, error) {
 	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {
-		return fallback
+		return fallback, nil
 	}
 	v, err := strconv.ParseBool(raw)
 	if err != nil {
-		return fallback
+		return false, fmt.Errorf("%s must be a valid bool: %w", key, err)
 	}
-	return v
+	return v, nil
 }
 
-func getenvDuration(key string, fallback time.Duration) time.Duration {
+func getenvDuration(key string, fallback time.Duration) (time.Duration, error) {
 	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {
-		return fallback
+		return fallback, nil
 	}
 	d, err := time.ParseDuration(raw)
 	if err != nil {
-		return fallback
+		return 0, fmt.Errorf("%s must be a valid duration: %w", key, err)
 	}
-	return d
+	return d, nil
 }
 
 func parseSet(raw string) map[string]struct{} {

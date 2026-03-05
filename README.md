@@ -30,3 +30,4 @@ npm run dev
 ## 注意
 - 生产环境请使用 Postgres，并把 `WELFARE_COOKIE_SECURE=true`
 - `SUB2API_ADMIN_API_KEY` 仅保留在后端环境变量，不要暴露到前端
+- 前端已改为 Cookie 会话，不再在浏览器持久化 access token

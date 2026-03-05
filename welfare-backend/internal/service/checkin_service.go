@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
 	"strings"
 	"time"
 
@@ -21,6 +22,11 @@ var (
 	ErrAlreadyChecked  = errors.New("already checked in today")
 	ErrCheckinBlocked  = errors.New("checkin blocked")
 	ErrCheckinBusy     = errors.New("checkin processing")
+)
+
+var (
+	riskBlockUserPattern    = regexp.MustCompile(`^\d{1,20}$`)
+	riskBlockSubjectPattern = regexp.MustCompile(`^[A-Za-z0-9._:@-]{1,128}$`)
 )
 
 type CheckinService struct {
@@ -303,41 +309,54 @@ func (s *CheckinService) Checkin(ctx context.Context, actor CheckinActor, ip, us
 
 	noteText := fmt.Sprintf("welfare_checkin:%s", reserved.NoteToken)
 	found, err := s.sub2api.HasBalanceRecordByNoteToken(ctx, actor.Sub2APIUserID, reserved.NoteToken)
-	if err == nil && found {
-		appliedAt := time.Now()
-		if err := s.db.WithContext(ctx).Model(&model.CheckinGrant{}).
-			Where("id = ?", reserved.ID).
-			Updates(map[string]interface{}{"status": model.GrantStatusSuccess, "applied_at": &appliedAt, "last_error": "", "updated_at": time.Now()}).Error; err != nil {
-			return nil, err
+	if err != nil {
+		if updateErr := s.setGrantProcessingError(ctx, reserved.ID, fmt.Sprintf("check history failed: %v", err)); updateErr != nil {
+			return nil, updateErr
+		}
+		return &CheckinResult{Date: date, Amount: reserved.Amount, Status: model.GrantStatusProcessing, GrantID: reserved.ID, Message: "签到处理中，请稍后刷新"}, ErrCheckinBusy
+	}
+	if found {
+		if err := s.markGrantSuccess(ctx, reserved.ID); err != nil {
+			if updateErr := s.setGrantProcessingError(ctx, reserved.ID, fmt.Sprintf("mark success failed: %v", err)); updateErr != nil {
+				return nil, updateErr
+			}
+			return &CheckinResult{Date: date, Amount: reserved.Amount, Status: model.GrantStatusProcessing, GrantID: reserved.ID, Message: "签到处理中，请稍后刷新"}, ErrCheckinBusy
 		}
 		return &CheckinResult{Date: date, Amount: reserved.Amount, Status: model.GrantStatusSuccess, GrantID: reserved.ID, Message: "今日已签到"}, ErrAlreadyChecked
 	}
 	addErr := s.sub2api.AddBalance(ctx, actor.Sub2APIUserID, reserved.Amount, noteText)
 	if addErr != nil {
 		reconciled := false
-		found, err := s.sub2api.HasBalanceRecordByNoteToken(ctx, actor.Sub2APIUserID, reserved.NoteToken)
-		if err == nil && found {
+		found, checkErr := s.sub2api.HasBalanceRecordByNoteToken(ctx, actor.Sub2APIUserID, reserved.NoteToken)
+		if checkErr == nil && found {
 			reconciled = true
 		}
 		if reconciled {
-			appliedAt := time.Now()
-			_ = s.db.WithContext(ctx).Model(&model.CheckinGrant{}).
-				Where("id = ?", reserved.ID).
-				Updates(map[string]interface{}{"status": model.GrantStatusSuccess, "applied_at": &appliedAt, "last_error": "", "updated_at": time.Now()}).Error
+			if err := s.markGrantSuccess(ctx, reserved.ID); err != nil {
+				if updateErr := s.setGrantProcessingError(ctx, reserved.ID, fmt.Sprintf("mark success failed: %v", err)); updateErr != nil {
+					return nil, updateErr
+				}
+				return &CheckinResult{Date: date, Amount: reserved.Amount, Status: model.GrantStatusProcessing, GrantID: reserved.ID, Message: "签到处理中，请稍后刷新"}, ErrCheckinBusy
+			}
 			return &CheckinResult{Date: date, Amount: reserved.Amount, Status: model.GrantStatusSuccess, GrantID: reserved.ID, Message: "签到成功"}, nil
 		}
-
-		_ = s.db.WithContext(ctx).Model(&model.CheckinGrant{}).
-			Where("id = ?", reserved.ID).
-			Updates(map[string]interface{}{"status": model.GrantStatusFailed, "last_error": addErr.Error(), "updated_at": time.Now()}).Error
+		if checkErr != nil {
+			if updateErr := s.setGrantProcessingError(ctx, reserved.ID, fmt.Sprintf("add failed and recheck failed: %v", checkErr)); updateErr != nil {
+				return nil, updateErr
+			}
+			return &CheckinResult{Date: date, Amount: reserved.Amount, Status: model.GrantStatusProcessing, GrantID: reserved.ID, Message: "签到处理中，请稍后刷新"}, ErrCheckinBusy
+		}
+		if err := s.markGrantFailed(ctx, reserved.ID, addErr.Error()); err != nil {
+			return nil, err
+		}
 		return nil, addErr
 	}
 
-	appliedAt := time.Now()
-	if err := s.db.WithContext(ctx).Model(&model.CheckinGrant{}).
-		Where("id = ?", reserved.ID).
-		Updates(map[string]interface{}{"status": model.GrantStatusSuccess, "applied_at": &appliedAt, "last_error": "", "updated_at": time.Now()}).Error; err != nil {
-		return nil, err
+	if err := s.markGrantSuccess(ctx, reserved.ID); err != nil {
+		if updateErr := s.setGrantProcessingError(ctx, reserved.ID, fmt.Sprintf("mark success failed: %v", err)); updateErr != nil {
+			return nil, updateErr
+		}
+		return &CheckinResult{Date: date, Amount: reserved.Amount, Status: model.GrantStatusProcessing, GrantID: reserved.ID, Message: "签到处理中，请稍后刷新"}, ErrCheckinBusy
 	}
 	return &CheckinResult{Date: date, Amount: reserved.Amount, Status: model.GrantStatusSuccess, GrantID: reserved.ID, Message: "签到成功"}, nil
 }
@@ -403,12 +422,17 @@ func (s *CheckinService) AdminUpdateCampaign(ctx context.Context, adminSubject s
 	if _, err := time.LoadLocation(campaign.Timezone); err != nil {
 		return nil, fmt.Errorf("invalid timezone: %w", err)
 	}
-	campaign.UpdatedBy = adminSubject
-	if err := s.db.WithContext(ctx).Save(campaign).Error; err != nil {
+	after := fmt.Sprintf("enabled=%v,min=%.2f,max=%.2f,scale=%d,tz=%s", campaign.Enabled, campaign.RewardMin, campaign.RewardMax, campaign.RewardScale, campaign.Timezone)
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		campaign.UpdatedBy = adminSubject
+		if err := tx.Save(campaign).Error; err != nil {
+			return err
+		}
+		return s.writeAuditWithDB(ctx, tx, adminSubject, "update_campaign", "checkin_campaign", fmt.Sprintf("%d", campaign.ID), before, after)
+	})
+	if err != nil {
 		return nil, err
 	}
-	after := fmt.Sprintf("enabled=%v,min=%.2f,max=%.2f,scale=%d,tz=%s", campaign.Enabled, campaign.RewardMin, campaign.RewardMax, campaign.RewardScale, campaign.Timezone)
-	_ = s.writeAudit(ctx, adminSubject, "update_campaign", "checkin_campaign", fmt.Sprintf("%d", campaign.ID), before, after)
 	return campaign, nil
 }
 
@@ -449,11 +473,11 @@ func (s *CheckinService) AdminCreateBlock(ctx context.Context, adminSubject stri
 	in.BlockType = strings.TrimSpace(in.BlockType)
 	in.BlockValue = strings.TrimSpace(in.BlockValue)
 	in.Reason = strings.TrimSpace(in.Reason)
-	if in.BlockType == "" || in.BlockValue == "" || in.Reason == "" {
-		return nil, errors.New("block_type, block_value, reason are required")
+	if err := validateRiskBlockInput(in); err != nil {
+		return nil, err
 	}
-	if in.BlockType != "user" && in.BlockType != "subject" && in.BlockType != "ip" {
-		return nil, errors.New("block_type must be user/subject/ip")
+	if in.ExpiresAt != nil && in.ExpiresAt.Before(time.Now()) {
+		return nil, errors.New("expires_at must be in the future")
 	}
 	record := model.RiskBlock{
 		BlockType:  in.BlockType,
@@ -462,23 +486,29 @@ func (s *CheckinService) AdminCreateBlock(ctx context.Context, adminSubject stri
 		ExpiresAt:  in.ExpiresAt,
 		CreatedBy:  adminSubject,
 	}
-	if err := s.db.WithContext(ctx).Create(&record).Error; err != nil {
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&record).Error; err != nil {
+			return err
+		}
+		return s.writeAuditWithDB(ctx, tx, adminSubject, "create_block", "risk_block", fmt.Sprintf("%d", record.ID), "", fmt.Sprintf("%s:%s", record.BlockType, record.BlockValue))
+	})
+	if err != nil {
 		return nil, err
 	}
-	_ = s.writeAudit(ctx, adminSubject, "create_block", "risk_block", fmt.Sprintf("%d", record.ID), "", fmt.Sprintf("%s:%s", record.BlockType, record.BlockValue))
 	return &record, nil
 }
 
 func (s *CheckinService) AdminDeleteBlock(ctx context.Context, adminSubject string, id uint) error {
-	var block model.RiskBlock
-	if err := s.db.WithContext(ctx).First(&block, id).Error; err != nil {
-		return err
-	}
-	if err := s.db.WithContext(ctx).Delete(&model.RiskBlock{}, id).Error; err != nil {
-		return err
-	}
-	_ = s.writeAudit(ctx, adminSubject, "delete_block", "risk_block", fmt.Sprintf("%d", id), fmt.Sprintf("%s:%s", block.BlockType, block.BlockValue), "")
-	return nil
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var block model.RiskBlock
+		if err := tx.First(&block, id).Error; err != nil {
+			return err
+		}
+		if err := tx.Delete(&model.RiskBlock{}, id).Error; err != nil {
+			return err
+		}
+		return s.writeAuditWithDB(ctx, tx, adminSubject, "delete_block", "risk_block", fmt.Sprintf("%d", id), fmt.Sprintf("%s:%s", block.BlockType, block.BlockValue), "")
+	})
 }
 
 func (s *CheckinService) getCampaign(ctx context.Context) (*model.CheckinCampaign, error) {
@@ -525,6 +555,10 @@ func (s *CheckinService) isBlocked(ctx context.Context, actor CheckinActor, ip s
 }
 
 func (s *CheckinService) writeAudit(ctx context.Context, adminSubject, action, targetType, targetID, before, after string) error {
+	return s.writeAuditWithDB(ctx, s.db, adminSubject, action, targetType, targetID, before, after)
+}
+
+func (s *CheckinService) writeAuditWithDB(ctx context.Context, db *gorm.DB, adminSubject, action, targetType, targetID, before, after string) error {
 	row := model.AdminAuditLog{
 		AdminSubject: adminSubject,
 		Action:       action,
@@ -533,7 +567,7 @@ func (s *CheckinService) writeAudit(ctx context.Context, adminSubject, action, t
 		BeforeJSON:   before,
 		AfterJSON:    after,
 	}
-	return s.db.WithContext(ctx).Create(&row).Error
+	return db.WithContext(ctx).Create(&row).Error
 }
 
 func toCampaignDTO(c *model.CheckinCampaign) CheckinCampaign {
@@ -603,17 +637,76 @@ func (s *CheckinService) reconcileGrantFromSub2API(ctx context.Context, grant *m
 		return false, nil
 	}
 	found, err := s.sub2api.HasBalanceRecordByNoteToken(ctx, grant.Sub2APIUserID, grant.NoteToken)
-	if err != nil || !found {
-		return false, nil
-	}
-	appliedAt := time.Now()
-	if err := s.db.WithContext(ctx).Model(&model.CheckinGrant{}).
-		Where("id = ?", grant.ID).
-		Updates(map[string]interface{}{"status": model.GrantStatusSuccess, "applied_at": &appliedAt, "last_error": "", "updated_at": time.Now()}).Error; err != nil {
+	if err != nil {
 		return false, err
 	}
+	if !found {
+		return false, nil
+	}
+	if err := s.markGrantSuccess(ctx, grant.ID); err != nil {
+		return false, err
+	}
+	appliedAt := time.Now()
 	grant.Status = model.GrantStatusSuccess
 	grant.AppliedAt = &appliedAt
 	grant.LastError = ""
 	return true, nil
+}
+
+func (s *CheckinService) markGrantSuccess(ctx context.Context, grantID uint) error {
+	appliedAt := time.Now()
+	return s.db.WithContext(ctx).Model(&model.CheckinGrant{}).
+		Where("id = ?", grantID).
+		Updates(map[string]interface{}{
+			"status":     model.GrantStatusSuccess,
+			"applied_at": &appliedAt,
+			"last_error": "",
+			"updated_at": time.Now(),
+		}).Error
+}
+
+func (s *CheckinService) markGrantFailed(ctx context.Context, grantID uint, reason string) error {
+	return s.db.WithContext(ctx).Model(&model.CheckinGrant{}).
+		Where("id = ?", grantID).
+		Updates(map[string]interface{}{
+			"status":     model.GrantStatusFailed,
+			"last_error": strings.TrimSpace(reason),
+			"updated_at": time.Now(),
+		}).Error
+}
+
+func (s *CheckinService) setGrantProcessingError(ctx context.Context, grantID uint, reason string) error {
+	return s.db.WithContext(ctx).Model(&model.CheckinGrant{}).
+		Where("id = ?", grantID).
+		Updates(map[string]interface{}{
+			"status":     model.GrantStatusProcessing,
+			"last_error": strings.TrimSpace(reason),
+			"updated_at": time.Now(),
+		}).Error
+}
+
+func validateRiskBlockInput(in RiskBlockInput) error {
+	if in.BlockType == "" || in.BlockValue == "" || in.Reason == "" {
+		return errors.New("block_type, block_value, reason are required")
+	}
+	if len(in.Reason) > 512 {
+		return errors.New("reason too long")
+	}
+	switch in.BlockType {
+	case "ip":
+		if net.ParseIP(in.BlockValue) == nil {
+			return errors.New("invalid ip block_value")
+		}
+	case "user":
+		if !riskBlockUserPattern.MatchString(in.BlockValue) {
+			return errors.New("invalid user block_value")
+		}
+	case "subject":
+		if !riskBlockSubjectPattern.MatchString(in.BlockValue) {
+			return errors.New("invalid subject block_value")
+		}
+	default:
+		return errors.New("block_type must be user/subject/ip")
+	}
+	return nil
 }

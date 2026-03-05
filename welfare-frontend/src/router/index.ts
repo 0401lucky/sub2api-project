@@ -4,6 +4,7 @@ import LoginView from '../views/LoginView.vue'
 import AuthCallbackView from '../views/AuthCallbackView.vue'
 import AdminView from '../views/AdminView.vue'
 import { useAuthStore } from '../store/auth'
+import { sanitizeAuthRedirect } from '../utils/authRedirect'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -20,8 +21,12 @@ router.beforeEach(async (to) => {
   if (!auth.state.loaded) {
     await auth.loadProfile()
   }
-  if (to.meta.requireAuth && !auth.state.token) {
-    return '/login'
+  if (to.path === '/login' && auth.state.profile) {
+    const redirect = sanitizeAuthRedirect(typeof to.query.redirect === 'string' ? to.query.redirect : '/')
+    return redirect
+  }
+  if (to.meta.requireAuth && !auth.state.profile) {
+    return { path: '/login', query: { redirect: to.fullPath } }
   }
   if (to.meta.requireAdmin && !auth.state.profile?.is_admin) {
     return '/'

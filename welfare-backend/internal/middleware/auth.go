@@ -11,23 +11,25 @@ import (
 
 const authClaimsKey = "auth_claims"
 
-func Auth(jwtService *service.JWTService) gin.HandlerFunc {
+func Auth(jwtService *service.JWTService, revocation *service.TokenRevocationService) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		header := strings.TrimSpace(c.GetHeader("Authorization"))
-		if header == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"code": http.StatusUnauthorized, "message": "missing authorization header"})
+		tokenRaw := strings.TrimSpace(extractBearer(c))
+		if tokenRaw == "" {
+			tokenRaw = readTokenFromCookie(c)
+		}
+		if tokenRaw == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"code": http.StatusUnauthorized, "message": "unauthorized"})
 			c.Abort()
 			return
 		}
-		parts := strings.SplitN(header, " ", 2)
-		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-			c.JSON(http.StatusUnauthorized, gin.H{"code": http.StatusUnauthorized, "message": "invalid authorization header"})
-			c.Abort()
-			return
-		}
-		claims, err := jwtService.Parse(strings.TrimSpace(parts[1]))
+		claims, err := jwtService.Parse(tokenRaw)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"code": http.StatusUnauthorized, "message": "invalid token"})
+			c.Abort()
+			return
+		}
+		if revocation != nil && revocation.IsRevoked(claims.ID) {
+			c.JSON(http.StatusUnauthorized, gin.H{"code": http.StatusUnauthorized, "message": "token revoked"})
 			c.Abort()
 			return
 		}
@@ -36,7 +38,7 @@ func Auth(jwtService *service.JWTService) gin.HandlerFunc {
 	}
 }
 
-func AdminOnly() gin.HandlerFunc {
+func AdminOnly(authService *service.AuthService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		claims, ok := GetClaims(c)
 		if !ok {
@@ -44,7 +46,7 @@ func AdminOnly() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		if !claims.IsAdmin {
+		if authService == nil || !authService.IsAdminSubject(claims.LinuxDOSubject) {
 			c.JSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "message": "admin only"})
 			c.Abort()
 			return
@@ -60,4 +62,24 @@ func GetClaims(c *gin.Context) (*service.AuthClaims, bool) {
 	}
 	claims, ok := v.(*service.AuthClaims)
 	return claims, ok
+}
+
+func extractBearer(c *gin.Context) string {
+	header := strings.TrimSpace(c.GetHeader("Authorization"))
+	if header == "" {
+		return ""
+	}
+	parts := strings.SplitN(header, " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return ""
+	}
+	return strings.TrimSpace(parts[1])
+}
+
+func readTokenFromCookie(c *gin.Context) string {
+	token, err := c.Cookie("wf_access_token")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(token)
 }

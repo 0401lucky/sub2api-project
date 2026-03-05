@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,27 +15,43 @@ type ipLimiter struct {
 	lastSeen time.Time
 }
 
-type IPRateLimiter struct {
-	mu       sync.Mutex
-	limiters map[string]*ipLimiter
-	rate     rate.Limit
-	burst    int
+type RateLimiter struct {
+	mu          sync.Mutex
+	limiters    map[string]*ipLimiter
+	rate        rate.Limit
+	burst       int
+	ttl         time.Duration
+	lastCleanup time.Time
+	keyFn       func(*gin.Context) string
 }
 
-func NewIPRateLimiter(r rate.Limit, burst int) *IPRateLimiter {
-	out := &IPRateLimiter{
-		limiters: make(map[string]*ipLimiter),
-		rate:     r,
-		burst:    burst,
+func NewRateLimiter(r rate.Limit, burst int, keyFn func(*gin.Context) string) *RateLimiter {
+	if keyFn == nil {
+		keyFn = func(c *gin.Context) string {
+			return strings.TrimSpace(c.ClientIP())
+		}
 	}
-	go out.cleanupLoop()
-	return out
+	return &RateLimiter{
+		limiters:    make(map[string]*ipLimiter),
+		rate:        r,
+		burst:       burst,
+		ttl:         30 * time.Minute,
+		lastCleanup: time.Now(),
+		keyFn:       keyFn,
+	}
 }
 
-func (l *IPRateLimiter) Middleware() gin.HandlerFunc {
+func NewIPRateLimiter(r rate.Limit, burst int) *RateLimiter {
+	return NewRateLimiter(r, burst, nil)
+}
+
+func (l *RateLimiter) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		ip := c.ClientIP()
-		limiter := l.getLimiter(ip)
+		key := strings.TrimSpace(l.keyFn(c))
+		if key == "" {
+			key = c.ClientIP()
+		}
+		limiter := l.getLimiter(key)
 		if !limiter.Allow() {
 			c.JSON(http.StatusTooManyRequests, gin.H{"code": http.StatusTooManyRequests, "message": "too many requests"})
 			c.Abort()
@@ -44,29 +61,30 @@ func (l *IPRateLimiter) Middleware() gin.HandlerFunc {
 	}
 }
 
-func (l *IPRateLimiter) getLimiter(ip string) *rate.Limiter {
+func (l *RateLimiter) getLimiter(key string) *rate.Limiter {
+	now := time.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	entry, ok := l.limiters[ip]
+	l.cleanupExpiredLocked(now)
+
+	entry, ok := l.limiters[key]
 	if !ok {
 		entry = &ipLimiter{limiter: rate.NewLimiter(l.rate, l.burst)}
-		l.limiters[ip] = entry
+		l.limiters[key] = entry
 	}
-	entry.lastSeen = time.Now()
+	entry.lastSeen = now
 	return entry.limiter
 }
 
-func (l *IPRateLimiter) cleanupLoop() {
-	ticker := time.NewTicker(10 * time.Minute)
-	defer ticker.Stop()
-	for range ticker.C {
-		cutoff := time.Now().Add(-30 * time.Minute)
-		l.mu.Lock()
-		for ip, entry := range l.limiters {
-			if entry.lastSeen.Before(cutoff) {
-				delete(l.limiters, ip)
-			}
-		}
-		l.mu.Unlock()
+func (l *RateLimiter) cleanupExpiredLocked(now time.Time) {
+	if now.Sub(l.lastCleanup) < 10*time.Minute {
+		return
 	}
+	cutoff := now.Add(-l.ttl)
+	for key, entry := range l.limiters {
+		if entry.lastSeen.Before(cutoff) {
+			delete(l.limiters, key)
+		}
+	}
+	l.lastCleanup = now
 }

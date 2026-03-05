@@ -11,6 +11,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
 
@@ -76,7 +77,10 @@ func ensureDefaultCampaign(db *gorm.DB, tz string) error {
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
-	if err := db.Create(&campaign).Error; err != nil {
+	if err := db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "code"}},
+		DoNothing: true,
+	}).Create(&campaign).Error; err != nil {
 		return fmt.Errorf("create default campaign: %w", err)
 	}
 	return nil

@@ -7,6 +7,7 @@
 - `/auth/callback` OAuth 回调
 - `/` 用户签到页
 - `/admin` 管理后台（管理员可见）
+- 使用 HttpOnly Cookie 会话，不在前端持久化 token
 
 ## 启动
 ```bash
